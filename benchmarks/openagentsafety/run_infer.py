@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import requests
 from jinja2 import Environment, FileSystemLoader
+from pydantic import SecretStr
 
 from benchmarks.openagentsafety.build_images import (
     build_workspace_image,
@@ -59,6 +60,8 @@ class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles numpy types."""
 
     def default(self, o):
+        if isinstance(o, SecretStr):
+            return str(o)
         if isinstance(o, np.integer):
             return int(o)
         elif isinstance(o, np.floating):
@@ -506,7 +509,7 @@ class OpenAgentSafetyEvaluation(Evaluation):
                 test_result={"error": str(e)},
                 instruction=instruction,
                 error=str(e),
-                history=[],
+                history=[event.model_dump(mode="json") for event in received_events],
                 metrics=conversation.conversation_stats.get_combined_metrics(),
             )
 
@@ -705,7 +708,7 @@ def main() -> None:
                     output_dict = out.model_dump()
                     # Clean up any remaining numpy types
                     output_dict = convert_numpy_types(output_dict)
-                    json_str = json.dumps(output_dict)
+                    json_str = json.dumps(output_dict, cls=NumpyEncoder)
                     f.write(json_str + "\n")
                     fcntl.flock(f, fcntl.LOCK_UN)
             except Exception as e:

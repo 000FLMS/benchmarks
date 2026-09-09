@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import json
+from pydantic import SecretStr
+import numpy as np
 
 from benchmarks.openagentsafety import build_images, run_infer
 
@@ -71,3 +74,10 @@ def test_missing_required_asset_stops_setup(kind):
                 f"{kind}_files": [f"https://example.com/{kind}/missing.txt"],
             },
         )
+
+
+def test_failure_output_serializes_metrics_without_credentials():
+    payload = {"api_key": SecretStr("private-test-key"), "tokens": np.int64(42)}
+    encoded = json.dumps(payload, cls=run_infer.NumpyEncoder)
+    assert "private-test-key" not in encoded
+    assert json.loads(encoded) == {"api_key": "**********", "tokens": 42}
