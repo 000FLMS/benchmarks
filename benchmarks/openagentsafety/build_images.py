@@ -72,7 +72,7 @@ def build_workspace_image(force_rebuild: bool = False, no_cache: bool = False) -
     logger.info("#### This will take approximately 3-5 minutes...")
 
     dockerfile_dir = Path(__file__).parent  # benchmarks/benchmarks/openagentsafety/
-    build_context = dockerfile_dir.parent.parent.parent
+    build_context = dockerfile_dir.parent.parent
 
     logger.info(f"Build context: {build_context}")
     logger.info(f"Dockerfile: {dockerfile_dir / 'Dockerfile'}")

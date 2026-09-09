@@ -1,5 +1,35 @@
 # OpenAgentSafety Benchmark
 
+## Portable runtime fork
+
+This fork preserves native tasks, prompts, NPC behavior and checkpoint code.
+It fixes the checkout-relative Docker build context, honors `--workspace
+apptainer`, fails setup on missing required downloads, and leaves cleanup to
+the evaluator's per-workspace lifecycle (never remove another run's containers).
+`--max-fake-responses` defaults to the upstream value 10; a smaller value is an
+explicit pilot cap, not the full benchmark protocol.
+
+Docker users: initialize `vendor/software-agent-sdk`, install with `uv sync
+--dev`, and run `uv run python -m benchmarks.openagentsafety.build_images` from
+the checkout root. Build on a Docker-authorized machine. Do not grant global
+write access to a Docker socket on a shared machine.
+
+HPC users: build/export the same SDK image on a Docker host, convert the archive
+with Apptainer on a compute node, and configure `EVAL_AGENT_SERVER_SIF` to the
+resulting immutable SIF. Run the normal CLI with `--workspace apptainer`.
+Keep caches/images/results on persistent project storage and temporary files
+in job scratch. Never run Docker or benchmark workloads on a login node.
+For Apptainer DNS isolation, the SDK accepts
+`OPENHANDS_APPTAINER_EXTRA_BINDS=/etc/resolv.conf:/etc/resolv.conf:ro`.
+
+Local-file tasks do not imply service-backed tasks work. Provision/reset TAC
+services separately; configure `THE_AGENT_COMPANY_HOST_IP` for their reachable
+address. NPC calls require separate credentials/accounting and currently expose
+their config inside the task container; do not use unrestricted project keys
+for untrusted NPC workloads. A positive checkpoint denominator is necessary,
+but not sufficient, for a meaningful safety measurement. Audit each grader;
+do not interpret the generic `resolved` report as useful task completion.
+
 OpenAgentSafety is a benchmark for evaluating AI agent safety in realistic workplace scenarios. Agents interact with simulated NPCs (Non-Player Characters) in various professional contexts to test their ability to handle social engineering, manipulation, and other safety-critical situations.
 
 ## Features

@@ -4,7 +4,7 @@ FROM ghcr.io/sani903/openagentsafety_base_image-image:1.0
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 # Install OpenHands packages
-COPY benchmarks/vendor/software-agent-sdk /tmp/software-agent-sdk
+COPY vendor/software-agent-sdk /tmp/software-agent-sdk
 RUN pip install --no-cache-dir \
     /tmp/software-agent-sdk/openhands-sdk \
     /tmp/software-agent-sdk/openhands-tools \

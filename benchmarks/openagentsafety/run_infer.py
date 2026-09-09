@@ -3,7 +3,6 @@
 import fcntl
 import json
 import os
-import subprocess
 import time
 from typing import Any, List
 
@@ -14,7 +13,6 @@ from jinja2 import Environment, FileSystemLoader
 
 from benchmarks.openagentsafety.build_images import (
     build_workspace_image,
-    check_image_exists,
     get_image_name,
 )
 from benchmarks.utils.agent_context import create_agent_context
@@ -33,7 +31,7 @@ from benchmarks.utils.tool_presets import get_tools_for_preset
 from openhands.sdk import Agent, Conversation, Tool, get_logger
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.task import TaskToolSet
-from openhands.workspace import DockerWorkspace
+from openhands.workspace import ApptainerWorkspace, DockerWorkspace
 
 
 logger = get_logger(__name__)
@@ -142,10 +140,10 @@ def download_files_for_task(workspace, instance_data: dict) -> None:
                                 f"chmod +x {dest_path}", timeout=30
                             )
                     else:
-                        logger.error(f"Failed to download {file_url}: {result.stderr}")
+                        raise RuntimeError(f"Required asset download failed: {file_url}: {result.stderr}")
 
                 except Exception as e:
-                    logger.error(f"Error downloading {file_url}: {e}")
+                    raise RuntimeError(f"Cannot prepare required asset {file_url}") from e
 
     # Download utils files
     if instance_data.get("has_utils", False):
@@ -181,40 +179,49 @@ def download_files_for_task(workspace, instance_data: dict) -> None:
                                 f"chmod +x {dest_path}", timeout=30
                             )
                     else:
-                        logger.error(f"Failed to download {file_url}: {result.stderr}")
+                        raise RuntimeError(f"Required asset download failed: {file_url}: {result.stderr}")
 
                 except Exception as e:
-                    logger.error(f"Error downloading {file_url}: {e}")
+                    raise RuntimeError(f"Cannot prepare required asset {file_url}") from e
 
 
-def cleanup_docker_containers():
-    """Clean up lingering Docker containers."""
-    try:
-        result = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "-a",
-                "-q",
-                "--filter",
-                f"ancestor={get_image_name()}",
-            ],
-            capture_output=True,
-            text=True,
+def create_workspace(workspace_type: str, forward_env: list[str]) -> RemoteWorkspace:
+    """Select the native backend; the evaluation orchestrator owns its cleanup.
+
+    Apptainer uses a prebuilt SIF and must never invoke Docker on HPC nodes.
+    Cleanup is per workspace, never all containers sharing an image.
+    """
+    if workspace_type == "apptainer":
+        sif_file = os.environ.get("EVAL_AGENT_SERVER_SIF", "")
+        if not sif_file or not os.path.isfile(sif_file):
+            raise ValueError("EVAL_AGENT_SERVER_SIF must name an existing SIF file")
+        return ApptainerWorkspace(
+            sif_file=sif_file,
+            working_dir="/workspace",
+            forward_env=forward_env,
+            cache_dir=os.environ.get("APPTAINER_CACHEDIR") or None,
         )
-        container_ids = [c for c in result.stdout.strip().split("\n") if c]
-        if container_ids:
-            logger.info(f"Cleaning up {len(container_ids)} containers")
-            subprocess.run(["docker", "rm", "-f"] + container_ids, capture_output=True)
-            time.sleep(2)
-    except Exception as e:
-        logger.warning(f"Cleanup failed: {e}")
+    if workspace_type != "docker":
+        raise ValueError(f"Unsupported OpenAgentSafety workspace: {workspace_type}")
+    return DockerWorkspace(
+        server_image=build_workspace_image(),
+        platform="linux/amd64",
+        extra_ports=True,
+        forward_env=forward_env,
+    )
 
 
 def setup_host_mapping(workspace):
     """Add the-agent-company.com host mapping inside the container."""
-    try:
+    from ipaddress import ip_address
+
+    gateway_ip = os.environ.get("THE_AGENT_COMPANY_HOST_IP", "").strip()
+    if not gateway_ip and isinstance(workspace, DockerWorkspace):
         gateway_ip = "172.17.0.1"
+    if not gateway_ip:
+        return
+    gateway_ip = str(ip_address(gateway_ip))
+    try:
         logger.info(f"Adding host mapping: {gateway_ip} the-agent-company.com")
         workspace.execute_command(
             f"echo '{gateway_ip} the-agent-company.com' >> /etc/hosts"
@@ -397,25 +404,7 @@ class OpenAgentSafetyEvaluation(Evaluation):
             resource_factor: Resource factor for runtime allocation (default: 1).
             forward_env: Environment variables to forward into the workspace.
         """
-        # Try to build image on-the-fly, fall back to pre-built if build fails
-        try:
-            server_image = build_workspace_image()
-        except (subprocess.CalledProcessError, RuntimeError) as e:
-            logger.warning(f"On-the-fly build failed: {e}")
-            server_image = get_image_name()
-
-            if not check_image_exists(server_image):
-                raise RuntimeError(
-                    f"On-the-fly build failed and pre-built image {server_image} does not exist"
-                )
-            logger.info(f"Using pre-built image {server_image}")
-
-        workspace = DockerWorkspace(
-            server_image=server_image,
-            platform="linux/amd64",
-            extra_ports=True,
-            forward_env=forward_env or [],
-        )
+        workspace = create_workspace(self.metadata.workspace_type, forward_env or [])
 
         # Setup host mapping for The Agent Company services
         setup_host_mapping(workspace)
@@ -502,7 +491,10 @@ class OpenAgentSafetyEvaluation(Evaluation):
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                run_conversation_with_fake_user_response(conversation)
+                run_conversation_with_fake_user_response(
+                    conversation,
+                    max_fake_responses=self.metadata.details.get("max_fake_responses", 10),
+                )
             logger.info(f"Conversation completed for {instance.id}")
         except ValidationError as e:
             logger.warning(f"Validation error from custom events (continuing): {e}")
@@ -642,9 +634,13 @@ def generate_report(output_jsonl: str, report_path: str, model_name: str) -> Non
 def main() -> None:
     """Main entry point."""
     parser = get_parser(add_llm_config=True)
+    parser.add_argument("--max-fake-responses", type=int, default=10,
+                        help="Maximum automatic user continuations; record reduced pilot caps.")
     # OpenAgentSafety-specific arguments here if needed
 
     args = parser.parse_args()
+    if args.max_fake_responses < 0:
+        parser.error("--max-fake-responses must be non-negative")
 
     # Validate args
     if args.n_critic_runs < 1:
@@ -682,18 +678,17 @@ def main() -> None:
         details={
             "server_image": get_image_name(),
             "platform": "linux/amd64",
+            "max_fake_responses": args.max_fake_responses,
         },
         eval_limit=args.n_limit,
         n_critic_runs=args.n_critic_runs,
         critic=critic,
         selected_instances_file=args.select,
         max_retries=args.max_retries,
+        workspace_type=args.workspace,
         tool_preset=args.tool_preset,
         enable_delegation=args.enable_delegation,
     )
-
-    # Initial cleanup
-    cleanup_docker_containers()
 
     # Create evaluator
     evaluator = OpenAgentSafetyEvaluation(
@@ -748,9 +743,6 @@ def main() -> None:
     # Generate .report.json for nemo_evaluator compatibility
     report_path = os.path.join(metadata.eval_output_dir, "output.report.json")
     generate_report(evaluator.output_path, report_path, llm.model)
-
-    # Final cleanup
-    cleanup_docker_containers()
 
     logger.info("Evaluation completed!")
     print(json.dumps({"output_json": str(evaluator.output_path)}))
